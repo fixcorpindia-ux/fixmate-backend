@@ -14,17 +14,43 @@ import multer from 'multer';
 import fs from 'fs';
 import Razorpay from "razorpay";
 import crypto from "crypto";
-
-// imports ke baad add karein
 import admin from "firebase-admin";
-import { readFileSync } from 'fs';
 
-// JSON file ko read karke initialize karein
-const serviceAccount = JSON.parse(readFileSync('./firebase-key.json', 'utf8'));
+let firebaseEnabled = false;
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
+try {
+  let serviceAccount;
+
+  // 🟢 1. Pehle ENV variable check karo (Render / Server)
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    serviceAccount = JSON.parse(
+      process.env.FIREBASE_SERVICE_ACCOUNT
+    );
+    console.log("✅ Firebase using ENV");
+  } 
+  // 🟢 2. Agar ENV nahi mila → local json file use karo
+  else if (fs.existsSync("./firebase-key.json")) {
+    serviceAccount = JSON.parse(
+      fs.readFileSync("./firebase-key.json", "utf8")
+    );
+    console.log("✅ Firebase using local firebase-key.json");
+  } 
+  // 🔴 3. Dono nahi mile
+  else {
+    console.warn("⚠️ Firebase not configured");
+  }
+
+  if (serviceAccount) {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+    firebaseEnabled = true;
+  }
+
+} catch (err) {
+  console.error("❌ Firebase init failed:", err.message);
+}
+
 
 // 🟢 SECURITY IMPORTS (Yahan add karein)
 import helmet from "helmet";
@@ -368,38 +394,62 @@ app.get("/api/admin/transactions/:userId", async (req, res) => {
 
 
 app.post("/api/admin/send-notification", async (req, res) => {
+
+    // 🟢 SAFETY CHECK: Firebase enabled hai ya nahi
+    if (!firebaseEnabled) {
+        return res.status(500).json({
+            success: false,
+            error: "Firebase not configured"
+        });
+    }
+
     try {
         const { title, body, target } = req.body; // target: 'all', 'user', 'partner'
         
         let query = {};
         if (target !== 'all') query.role = target;
 
-        // Sirf unhe dhoondo jinke paas fcmToken hai
+        // Sirf unhe dhoondo jinke paas fcmToken ho
         const users = await User.find(query).select("fcmToken");
-        const tokens = users.map(u => u.fcmToken).filter(t => t != null);
+        const tokens = users
+            .map(u => u.fcmToken)
+            .filter(t => t && t.length > 0);
 
         if (tokens.length === 0) {
-            return res.json({ success: false, message: "Kisi bhi device par token nahi mila." });
+            return res.json({
+                success: false,
+                message: "Kisi bhi device par FCM token nahi mila."
+            });
         }
 
         const message = {
-            notification: { title, body },
-            tokens: tokens,
+            notification: {
+                title,
+                body
+            },
+            tokens
         };
 
-        // Bulk notification send
-        const response = await admin.messaging().sendEachForMulticast(message);
-        
-        res.json({ 
-            success: true, 
-            sentCount: response.successCount, 
-            failureCount: response.failureCount 
+        // 🔥 Firebase bulk notification
+        const response = await admin
+            .messaging()
+            .sendEachForMulticast(message);
+
+        res.json({
+            success: true,
+            sentCount: response.successCount,
+            failureCount: response.failureCount
         });
+
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Notification bhejte waqt error aaya" });
+        console.error("❌ Notification error:", err);
+        res.status(500).json({
+            success: false,
+            error: "Notification bhejte waqt error aaya"
+        });
     }
 });
+
 
 
 
